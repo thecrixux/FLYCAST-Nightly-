@@ -1,0 +1,103 @@
+
+name: Flycast Android Nightly Auto-Releases
+
+on:
+  schedule:
+    - cron: '27 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: flycast-nightly
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Download and publish latest official APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Checking official Flycast Android CI..."
+
+          SHA=$(gh api \
+            "repos/flyinghead/flycast/actions/workflows/android.yml/runs?branch=master&event=push&status=success&per_page=10" \
+            --jq '.workflow_runs[0].head_sha')
+
+          if [[ ! "$SHA" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "No valid successful build found."
+            exit 1
+          fi
+
+          SHORT_SHA="${SHA:0:12}"
+          TAG="android-master-$SHORT_SHA"
+          APK="Flycast-Android-Nightly.apk"
+
+          echo "Official commit: $SHA"
+
+          if gh release view "$TAG" \
+            --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "This version is already published."
+            exit 0
+          fi
+
+          URL="https://flycast-builds.s3.fr-par.scw.cloud/android/heads/master-$SHA/flycast-release.apk"
+
+          echo "Downloading official APK..."
+
+          curl --fail --location \
+            --retry 3 \
+            --connect-timeout 20 \
+            --max-time 240 \
+            "$URL" \
+            --output "$APK"
+
+          echo "Validating APK..."
+
+          test "$(stat -c%s "$APK")" -gt 1000000
+          unzip -t "$APK" >/dev/null
+          unzip -Z -1 "$APK" | grep -Fx 'AndroidManifest.xml' >/dev/null
+
+          sha256sum "$APK" > SHA256SUMS.txt
+
+          cat > release-notes.txt <<EOF
+          Flycast Android Nightly
+
+          Automatic redistribution of the original official Android CI build.
+
+          Upstream repository:
+          https://github.com/flyinghead/flycast
+
+          Source commit:
+          https://github.com/flyinghead/flycast/commit/$SHA
+
+          Original APK:
+          $URL
+
+          This is an unofficial release mirror.
+          The APK has not been modified.
+          SHA-256 checksum included.
+          EOF
+
+          echo "Publishing GitHub Release..."
+
+          gh release create "$TAG" \
+            "$APK" \
+            SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --target master \
+            --title "Flycast Android Nightly ($SHORT_SHA)" \
+            --notes-file release-notes.txt \
+            --latest
+
+          echo "Release published successfully!"
+          
